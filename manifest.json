@@ -3,8 +3,8 @@
   "name": "ElevenLabs TTS",
   "version": "0.1.0",
   "minAppVersion": "1.5.0",
-  "description": "Convierte texto a voz usando ElevenLabs con resaltado palabra a palabra y control flotante.",
-  "author": "",
-  "authorUrl": "",
+  "description": "Converts text to speech using ElevenLabs with word-by-word highlight and floating controls.",
+  "author": "faccuo",
+  "authorUrl": "https://github.com/faccuo",
   "isDesktopOnly": true
 } 

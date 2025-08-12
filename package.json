@@ -6,7 +6,8 @@
   "license": "MIT",
   "scripts": {
     "dev": "esbuild main.ts --bundle --external:obsidian --format=cjs --platform=node --target=es2020 --outfile=main.js --sourcemap --watch",
-    "build": "esbuild main.ts --bundle --external:obsidian --format=cjs --platform=node --target=es2020 --outfile=main.js --minify"
+    "build": "esbuild main.ts --bundle --external:obsidian --format=cjs --platform=node --target=es2020 --outfile=main.js --minify",
+    "watch": "esbuild main.ts --bundle --external:obsidian --format=cjs --platform=node --target=es2020 --outfile=main.js --sourcemap --watch"
   },
   "devDependencies": {
     "@types/node": "^20.14.10",

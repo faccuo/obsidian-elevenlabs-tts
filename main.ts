@@ -221,6 +221,11 @@ export default class ElevenLabsTTSPlugin extends Plugin {
   async onload() {
     await this.loadSettings();
 
+    // Quick access ribbon icon
+    this.addRibbonIcon('audio-file', this.t('cmd.openPlayer'), async () => {
+      await this.openPlayerView();
+    });
+
     this.registerView(VIEW_TYPE_TTS, (leaf) => new TTSPlayerView(leaf, this));
     this.addSettingTab(new TTSSettingTab(this.app, this));
 
@@ -990,6 +995,11 @@ async function convertTextToSpeech(text: string, settings: ElevenlabsSettings) {
     ? 'audio/mpeg'
     : (body.output_format === 'wav' ? 'audio/wav' : 'application/octet-stream');
 
+  // Timeout protection
+  const controller = new AbortController();
+  const timeoutMs = 30000;
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+
   const response = await fetch(url, {
     method: 'POST',
     headers: {
@@ -998,7 +1008,9 @@ async function convertTextToSpeech(text: string, settings: ElevenlabsSettings) {
       'xi-api-key': settings.apiKey,
     },
     body: JSON.stringify(body),
+    signal: controller.signal,
   });
+  clearTimeout(timeoutId);
 
   if (!response.ok) {
     let errorText = '';
