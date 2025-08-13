@@ -9,7 +9,10 @@ interface ElevenlabsSettings {
   voiceId: string;
   modelId: string;
   saveToVault: boolean;
-  outputFolder: string;
+  outputFolder: string; // per-note subfolder (legacy/per-note mode)
+  // New: output location mode and global output folder
+  outputLocationMode?: 'global' | 'per-note';
+  globalOutputFolder?: string; // used when outputLocationMode === 'global'
   historyLimit: number;
   history: TTSHistoryEntry[];
   language: Lang;
@@ -22,6 +25,8 @@ interface ElevenlabsSettings {
   outputFormat: string;
   voices: ElevenlabsVoice[];
   voicesLastFetch?: number;
+  // New: control which voices to show in the dropdown
+  voicesFilter?: 'all' | 'userOnly';
 }
 
 interface TTSHistoryEntry {
@@ -46,7 +51,7 @@ const I18N: Record<Lang, Record<string, string>> = {
 
     'notice.configureKeys': 'Configura tu API Key y Voice ID de ElevenLabs en los ajustes del plugin.',
     'notice.noText': 'No hay texto para reproducir.',
-    'notice.saveFail': 'No se pudo guardar el audio en la bóveda.',
+    'notice.saveFail': 'No se pudo guardar el audio en el vault.',
     'notice.fileNotFound': 'Archivo no encontrado en historial.',
     'notice.errorPrefix': 'Error al generar audio: ',
     'notice.overlayOn': 'Overlay activado',
@@ -54,6 +59,9 @@ const I18N: Record<Lang, Record<string, string>> = {
     'notice.voicesLoaded': 'Voces actualizadas',
     'notice.voicesLoadError': 'Error al cargar voces',
     'notice.presetApplied': 'Preset aplicado:',
+    'notice.entryDeleted': 'Entrada eliminada (archivos borrados)',
+    'notice.historyCleared': 'Historial limpiado (archivos borrados)',
+    'notice.deleteError': 'Error al eliminar archivos:',
 
     'view.title': 'Reproductor TTS',
 
@@ -82,7 +90,7 @@ const I18N: Record<Lang, Record<string, string>> = {
 
     'settings.model.name': 'Modelo',
     'settings.model.desc': 'Modelo de ElevenLabs a usar',
-    'settings.save.name': 'Guardar audio en bóveda',
+    'settings.save.name': 'Guardar audio en vault',
     'settings.save.desc': 'Si está activo, guarda cada audio generado en la carpeta especificada (dentro de la carpeta de la nota actual)',
     'settings.subfolder.name': 'Subcarpeta de salida',
     'settings.subfolder.desc': 'Nombre de la subcarpeta dentro de la carpeta de la nota (por ejemplo, TTS)',
@@ -119,7 +127,7 @@ const I18N: Record<Lang, Record<string, string>> = {
 
     'notice.configureKeys': 'Set your ElevenLabs API Key and Voice ID in the plugin settings.',
     'notice.noText': 'No text to play.',
-    'notice.saveFail': 'Could not save audio to the vault.',
+    'notice.saveFail': 'Could not save audio to vault.',
     'notice.fileNotFound': 'File not found in history.',
     'notice.errorPrefix': 'Error generating audio: ',
     'notice.overlayOn': 'Overlay enabled',
@@ -127,6 +135,9 @@ const I18N: Record<Lang, Record<string, string>> = {
     'notice.voicesLoaded': 'Voices refreshed',
     'notice.voicesLoadError': 'Failed to load voices',
     'notice.presetApplied': 'Preset applied:',
+    'notice.entryDeleted': 'Entry deleted (files removed)',
+    'notice.historyCleared': 'History cleared (files removed)',
+    'notice.deleteError': 'Error deleting files:',
 
     'view.title': 'TTS Player',
 
@@ -187,6 +198,8 @@ const DEFAULT_SETTINGS: ElevenlabsSettings = {
   modelId: 'eleven_multilingual_v2',
   saveToVault: false,
   outputFolder: 'TTS',
+  outputLocationMode: 'global',
+  globalOutputFolder: 'TTS',
   historyLimit: 50,
   history: [],
   language: 'es',
@@ -198,6 +211,7 @@ const DEFAULT_SETTINGS: ElevenlabsSettings = {
   useSpeakerBoost: true,
   outputFormat: 'mp3_44100_128',
   voices: [],
+  voicesFilter: 'userOnly',
 };
 
 interface WordTiming { index: number; start: number; end: number; text: string; }
@@ -411,6 +425,12 @@ export default class ElevenLabsTTSPlugin extends Plugin {
     const view = await this.openPlayerView();
     const snippet = (text.trim().split(/\n+/)[0] || text).slice(0, 140);
     view.showPendingGeneration(snippet, this.t('pending.generating'));
+    // Ensure pending row is shown right below header while loading
+    view.renderHistory(this.settings.history, {
+      onPlayFromHistory: (e) => this.playHistory(e),
+      onClearHistory: () => this.clearHistory(),
+      onDeleteHistory: (e) => this.deleteHistoryEntry(e),
+    });
 
     try {
       // Solicitar TTS
@@ -522,6 +542,7 @@ export default class ElevenLabsTTSPlugin extends Plugin {
       this.playerView.renderHistory(this.settings.history, {
         onPlayFromHistory: (e) => this.playHistory(e),
         onClearHistory: () => this.clearHistory(),
+        onDeleteHistory: (e) => this.deleteHistoryEntry(e),
       });
       return this.playerView;
     }
@@ -531,6 +552,7 @@ export default class ElevenLabsTTSPlugin extends Plugin {
     this.playerView.renderHistory(this.settings.history, {
       onPlayFromHistory: (e) => this.playHistory(e),
       onClearHistory: () => this.clearHistory(),
+      onDeleteHistory: (e) => this.deleteHistoryEntry(e),
     });
     return this.playerView;
   }
@@ -547,6 +569,7 @@ export default class ElevenLabsTTSPlugin extends Plugin {
       onClose: () => this.stopAndCleanup(),
       onPlayFromHistory: async (entry) => { await this.playHistory(entry); },
       onClearHistory: async () => { await this.clearHistory(); },
+      onDeleteHistory: async (entry) => { await this.deleteHistoryEntry(entry); },
       labels: {
         play: this.t('controls.play'),
         pause: this.t('controls.pause'),
@@ -559,10 +582,8 @@ export default class ElevenLabsTTSPlugin extends Plugin {
   }
 
   private async saveAudioToVault(filename: string, arrayBuffer: ArrayBuffer): Promise<string> {
-    // Guardar en la carpeta actual de la nota activa, dentro del subdirectorio configurado
-    const active = this.app.workspace.getActiveFile();
-    const parentPath = active?.parent?.path ?? '';
-    const folderPath = parentPath ? `${parentPath}/${this.settings.outputFolder}` : this.settings.outputFolder;
+    // New: support global output folder or per-note subfolder
+    const folderPath = await this.getOutputFolderForSave();
     const existing = this.app.vault.getAbstractFileByPath(folderPath);
     if (!(existing instanceof TFolder)) {
       await this.app.vault.createFolder(folderPath);
@@ -570,6 +591,17 @@ export default class ElevenLabsTTSPlugin extends Plugin {
     const filePath = `${folderPath}/${filename}`;
     await this.app.vault.createBinary(filePath, arrayBuffer);
     return filePath;
+  }
+
+  private async getOutputFolderForSave(): Promise<string> {
+    const mode = this.settings.outputLocationMode ?? 'global';
+    if (mode === 'per-note') {
+      const active = this.app.workspace.getActiveFile();
+      const parentPath = active?.parent?.path ?? '';
+      return parentPath ? `${parentPath}/${this.settings.outputFolder}` : this.settings.outputFolder;
+    }
+    // global mode: vault-root relative path
+    return (this.settings.globalOutputFolder?.trim() || 'TTS');
   }
 
   private jsonPathForAudio(audioPath: string): string {
@@ -670,19 +702,110 @@ export default class ElevenLabsTTSPlugin extends Plugin {
     const hist = [normalized, ...this.settings.history].slice(0, Math.max(1, this.settings.historyLimit));
     this.settings.history = hist;
     this.saveSettings();
+    // Persist global index with all generations
+    this.writeGlobalIndex().catch(console.warn);
     if (this.playerView) this.playerView.renderHistory(this.settings.history, {
       onPlayFromHistory: (e) => this.playHistory(e),
       onClearHistory: () => this.clearHistory(),
+      onDeleteHistory: (e) => this.deleteHistoryEntry(e),
     });
   }
 
   async clearHistory() {
+    // Eliminar archivos físicos de todas las entradas
+    const deletePromises = this.settings.history.map(async (entry) => {
+      try {
+        // Eliminar archivo de audio
+        const audioFile = this.app.vault.getAbstractFileByPath(entry.path);
+        if (audioFile instanceof TFile) {
+          await this.app.vault.delete(audioFile);
+        }
+        
+        // Eliminar archivo sidecar JSON si existe
+        const sidecarPath = this.jsonPathForAudio(entry.path);
+        const sidecarFile = this.app.vault.getAbstractFileByPath(sidecarPath);
+        if (sidecarFile instanceof TFile) {
+          await this.app.vault.delete(sidecarFile);
+        }
+      } catch (e) {
+        console.warn(`Error deleting files for entry ${entry.path}:`, e);
+      }
+    });
+
+    // Esperar a que se eliminen todos los archivos (en paralelo)
+    await Promise.all(deletePromises);
+
+    // Limpiar historial
     this.settings.history = [];
     await this.saveSettings();
+    await this.writeGlobalIndex().catch(console.warn);
+    
+    // Notificar éxito
+    new Notice(this.t('notice.historyCleared'));
+    
     if (this.playerView) this.playerView.renderHistory(this.settings.history, {
       onPlayFromHistory: (e) => this.playHistory(e),
       onClearHistory: () => this.clearHistory(),
+      onDeleteHistory: (e) => this.deleteHistoryEntry(e),
     });
+  }
+
+  async deleteHistoryEntry(entry: TTSHistoryEntry) {
+    // Eliminar archivos físicos primero
+    try {
+      // Eliminar archivo de audio
+      const audioFile = this.app.vault.getAbstractFileByPath(entry.path);
+      if (audioFile instanceof TFile) {
+        await this.app.vault.delete(audioFile);
+      }
+      
+      // Eliminar archivo sidecar JSON si existe
+      const sidecarPath = this.jsonPathForAudio(entry.path);
+      const sidecarFile = this.app.vault.getAbstractFileByPath(sidecarPath);
+      if (sidecarFile instanceof TFile) {
+        await this.app.vault.delete(sidecarFile);
+      }
+    } catch (e: any) {
+      console.warn('Error deleting files for history entry:', e);
+      new Notice(`${this.t('notice.deleteError')} ${e?.message ?? String(e)}`);
+      // Continuar con la eliminación del historial aunque falle el borrado de archivos
+    }
+
+    // Eliminar entrada del historial
+    const byPath = (a: TTSHistoryEntry, b: TTSHistoryEntry) => a.path === b.path;
+    this.settings.history = this.settings.history.filter((e) => !byPath(e, entry));
+    await this.saveSettings();
+    await this.writeGlobalIndex().catch(console.warn);
+    
+    // Notificar éxito
+    new Notice(this.t('notice.entryDeleted'));
+    
+    if (this.playerView) this.playerView.renderHistory(this.settings.history, {
+      onPlayFromHistory: (e) => this.playHistory(e),
+      onClearHistory: () => this.clearHistory(),
+      onDeleteHistory: (e) => this.deleteHistoryEntry(e),
+    });
+  }
+
+  private async writeGlobalIndex() {
+    try {
+      const folder = this.settings.globalOutputFolder?.trim() || 'TTS';
+      const indexPath = `${folder}/index.json`;
+      // Ensure folder exists
+      const existingFolder = this.app.vault.getAbstractFileByPath(folder);
+      if (!(existingFolder instanceof TFolder)) {
+        await this.app.vault.createFolder(folder);
+      }
+      const payload = JSON.stringify({ updatedAt: Date.now(), entries: this.settings.history }, null, 2);
+      const existing = this.app.vault.getAbstractFileByPath(indexPath);
+      if (existing instanceof TFile) {
+        await this.app.vault.modify(existing, payload);
+      } else {
+        await this.app.vault.create(indexPath, payload);
+      }
+    } catch (e) {
+      console.warn('Failed to write global TTS index', e);
+    }
   }
 
   stopAndCleanup() {
@@ -731,6 +854,9 @@ export default class ElevenLabsTTSPlugin extends Plugin {
     if (typeof this.settings.useSpeakerBoost !== 'boolean') this.settings.useSpeakerBoost = DEFAULT_SETTINGS.useSpeakerBoost;
     if (typeof this.settings.outputFormat !== 'string') this.settings.outputFormat = DEFAULT_SETTINGS.outputFormat;
     if (!Array.isArray(this.settings.voices)) this.settings.voices = [];
+    if (this.settings.outputLocationMode !== 'global' && this.settings.outputLocationMode !== 'per-note') this.settings.outputLocationMode = DEFAULT_SETTINGS.outputLocationMode;
+    if (!this.settings.globalOutputFolder || typeof this.settings.globalOutputFolder !== 'string') this.settings.globalOutputFolder = DEFAULT_SETTINGS.globalOutputFolder;
+    if (this.settings.voicesFilter !== 'all' && this.settings.voicesFilter !== 'userOnly') this.settings.voicesFilter = DEFAULT_SETTINGS.voicesFilter;
   }
 
   async saveSettings() {
@@ -748,9 +874,15 @@ export default class ElevenLabsTTSPlugin extends Plugin {
       });
       if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
       const data = await res.json();
-      const voices: ElevenlabsVoice[] = Array.isArray(data?.voices)
-        ? data.voices.map((v: any) => ({ voice_id: String(v?.voice_id ?? v?.voiceId ?? ''), name: String(v?.name ?? '') }))
-        : [];
+      // Filter voices if requested: try to exclude premade/professional voices
+      let rawVoices: any[] = Array.isArray(data?.voices) ? data.voices : [];
+      if (this.settings.voicesFilter === 'userOnly') {
+        rawVoices = rawVoices.filter((v: any) => {
+          const category = String(v?.category ?? '');
+          return category ? (category !== 'premade' && category !== 'professional') : true;
+        });
+      }
+      const voices: ElevenlabsVoice[] = rawVoices.map((v: any) => ({ voice_id: String(v?.voice_id ?? v?.voiceId ?? ''), name: String(v?.name ?? '') }));
       this.settings.voices = voices.filter(v => v.voice_id && v.name);
       this.settings.voicesLastFetch = Date.now();
       await this.saveSettings();
@@ -910,6 +1042,29 @@ class TTSSettingTab extends PluginSettingTab {
         })
       );
 
+    // Output location mode
+    new Setting(containerEl)
+      .setName('Output location')
+      .setDesc('Choose where generated audio files are saved')
+      .addDropdown((drop) => drop
+        .addOptions({ global: 'Global (vault root folder)', 'per-note': 'Per-note subfolder' })
+        .setValue(this.plugin.settings.outputLocationMode || 'global')
+        .onChange(async (v) => { this.plugin.settings.outputLocationMode = (v as 'global' | 'per-note'); await this.plugin.saveSettings(); })
+      );
+
+    new Setting(containerEl)
+      .setName('Global output folder')
+      .setDesc('Vault-root relative folder for TTS files (used in Global mode). E.g., TTS or Media/TTS')
+      .addText((text) =>
+        text
+          .setPlaceholder('TTS')
+          .setValue(this.plugin.settings.globalOutputFolder || 'TTS')
+          .onChange(async (value) => {
+            this.plugin.settings.globalOutputFolder = value.trim() || 'TTS';
+            await this.plugin.saveSettings();
+          })
+      );
+
     new Setting(containerEl)
       .setName(this.plugin.t('settings.subfolder.name'))
       .setDesc(this.plugin.t('settings.subfolder.desc'))
@@ -935,6 +1090,16 @@ class TTSSettingTab extends PluginSettingTab {
             this.plugin.settings.historyLimit = Number.isFinite(n) && n > 0 ? Math.floor(n) : 50;
             await this.plugin.saveSettings();
           })
+      );
+
+    // Voices filter
+    new Setting(containerEl)
+      .setName('Voices filter')
+      .setDesc('Show all voices or only your voices (excludes premade/professional when possible)')
+      .addDropdown((drop) => drop
+        .addOptions({ userOnly: 'Only my voices', all: 'All voices' })
+        .setValue(this.plugin.settings.voicesFilter || 'userOnly')
+        .onChange(async (v) => { this.plugin.settings.voicesFilter = (v as 'all' | 'userOnly'); await this.plugin.saveSettings(); })
       );
 
     new Setting(containerEl)
@@ -1159,6 +1324,7 @@ class TTSPlayerView extends ItemView {
     this.renderHistory(this.plugin.settings.history, {
       onPlayFromHistory: (e) => this.plugin.playHistory(e),
       onClearHistory: () => this.plugin.clearHistory(),
+      onDeleteHistory: (e) => this.plugin.deleteHistoryEntry(e),
     });
 
     // Si ya hay audio activo, re-vincular
@@ -1173,6 +1339,7 @@ class TTSPlayerView extends ItemView {
         onClose: () => this.plugin.stopAndCleanup(),
         onPlayFromHistory: (e) => this.plugin.playHistory(e),
         onClearHistory: () => this.plugin.clearHistory(),
+        onDeleteHistory: (e) => this.plugin.deleteHistoryEntry(e),
         labels: {
           play: this.plugin.t('controls.play'),
           pause: this.plugin.t('controls.pause'),
@@ -1192,13 +1359,21 @@ class TTSPlayerView extends ItemView {
   showPendingGeneration(snippet: string, generatingText: string) {
     if (!this.historyContainer) return;
     this.clearPendingGeneration();
-    this.pendingEl = this.historyContainer.createDiv({ cls: 'tts-pending' });
+    // Build pending element detached, then insert below header
+    this.pendingEl = document.createElement('div');
+    this.pendingEl.addClass('tts-pending');
     const row = this.pendingEl.createDiv({ cls: 'row' });
     const left = row.createDiv({ cls: 'left' });
     const right = row.createDiv({ cls: 'right' });
     left.createEl('div', { cls: 'snippet', text: snippet });
     left.createEl('div', { cls: 'meta', text: generatingText });
     right.createDiv({ cls: 'spinner' });
+    const header = this.historyContainer.querySelector('.tts-history-header');
+    if (header && header.parentElement === this.historyContainer) {
+      this.historyContainer.insertBefore(this.pendingEl, header.nextSibling);
+    } else {
+      this.historyContainer.insertBefore(this.pendingEl, this.historyContainer.firstChild);
+    }
   }
 
   clearPendingGeneration() {
@@ -1216,6 +1391,7 @@ class TTSPlayerView extends ItemView {
     onPlayFromHistory: (entry: TTSHistoryEntry) => void | Promise<void>;
     onClearHistory: () => void | Promise<void>;
     labels?: { play: string; pause: string; stop: string; seek: string; speed: string; mute: string };
+    onDeleteHistory?: (entry: TTSHistoryEntry) => void | Promise<void>;
   }) {
     this.playBtn.onclick = handlers.onPlay;
     this.pauseBtn.onclick = handlers.onPause;
@@ -1241,20 +1417,20 @@ class TTSPlayerView extends ItemView {
     this.renderHistory(this.plugin.settings.history, handlers);
   }
 
-  renderHistory(entries: TTSHistoryEntry[], handlers?: { onPlayFromHistory: (entry: TTSHistoryEntry) => void | Promise<void>; onClearHistory: () => void | Promise<void> }) {
+  renderHistory(entries: TTSHistoryEntry[], handlers?: { onPlayFromHistory: (entry: TTSHistoryEntry) => void | Promise<void>; onClearHistory: () => void | Promise<void>; onDeleteHistory?: (entry: TTSHistoryEntry) => void | Promise<void> }) {
     if (!this.historyContainer) return;
     this.historyContainer.empty();
-
-    // Mantener el pending al principio si existe
-    if (this.pendingEl) {
-      this.historyContainer.appendChild(this.pendingEl);
-    }
 
     const header = this.historyContainer.createDiv({ cls: 'tts-history-header' });
     header.createEl('h4', { text: this.plugin.t('history.title') });
     const actions = header.createDiv({ cls: 'tts-history-actions' });
     const clearBtn = actions.createEl('button', { text: this.plugin.t('history.clear') });
     clearBtn.onclick = () => handlers?.onClearHistory?.();
+
+    // Insert pending row right after header if present
+    if (this.pendingEl) {
+      this.historyContainer.insertBefore(this.pendingEl, header.nextSibling);
+    }
 
     if (!entries.length) {
       this.historyContainer.createDiv({ text: this.plugin.t('history.empty') });
@@ -1272,6 +1448,8 @@ class TTSPlayerView extends ItemView {
       left.createEl('div', { cls: 'meta', text: `${new Date(e.createdAt).toLocaleString()} • ${e.sourceNotePath ?? ''}` });
       const play = right.createEl('button', { text: '▶', attr: { 'aria-label': this.plugin.t('controls.play') } });
       play.onclick = () => handlers?.onPlayFromHistory?.(e);
+      const del = right.createEl('button', { text: '✕', attr: { 'aria-label': 'Delete' } });
+      del.onclick = () => handlers?.onDeleteHistory?.(e);
     });
   }
 

@@ -1,7 +1,7 @@
 {
   "id": "elevenlabs-tts",
   "name": "ElevenLabs TTS",
-  "version": "0.1.0",
+  "version": "0.1.2",
   "minAppVersion": "1.5.0",
   "description": "Converts text to speech using ElevenLabs with word-by-word highlight and floating controls.",
   "author": "faccuo",

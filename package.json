@@ -1,6 +1,6 @@
 {
   "name": "elevenlabs-tts",
-  "version": "0.1.0",
+  "version": "0.1.2",
   "description": "Obsidian plugin for ElevenLabs TTS with overlay highlighting and floating controls.",
   "main": "main.js",
   "license": "MIT",
