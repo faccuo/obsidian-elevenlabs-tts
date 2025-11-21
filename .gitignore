@@ -7,4 +7,4 @@ yarn-error.log*
 .vscode/
 # Build outputs
 main.js
-main.js.map 
+main.js.map data.json
